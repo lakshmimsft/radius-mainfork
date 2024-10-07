@@ -107,124 +107,6 @@ func (e *executor) Delete(ctx context.Context, options Options) error {
     return nil
 }
 
-// createTerraformDestroyJob creates a Kubernetes Job that runs 'terraform destroy'.
-func createTerraformDestroyJob(ctx context.Context, clientset *kubernetes.Clientset, jobName, configMapName string) error {
-    job := &batchv1.Job{
-        ObjectMeta: metav1.ObjectMeta{
-            Name: jobName,
-        },
-        Spec: batchv1.JobSpec{
-            Template: corev1.PodTemplateSpec{
-                ObjectMeta: metav1.ObjectMeta{
-                    Labels: map[string]string{
-                        "job-name": jobName,
-                    },
-                },
-                Spec: corev1.PodSpec{
-                    RestartPolicy: corev1.RestartPolicyNever,
-                    Containers: []corev1.Container{
-                        {
-                            Name:  "terraform",
-                            Image: "hashicorp/terraform:light",
-                            Command: []string{
-                                "sh",
-                                "-c",
-                                "terraform init && terraform destroy -auto-approve",
-                            },
-                            WorkingDir: "/app/terraform",
-                            VolumeMounts: []corev1.VolumeMount{
-                                {
-                                    Name:      "terraform-config",
-                                    MountPath: "/app/terraform",
-                                },
-                            },
-                        },
-                    },
-                    Volumes: []corev1.Volume{
-                        {
-                            Name: "terraform-config",
-                            VolumeSource: corev1.VolumeSource{
-                                ConfigMap: &corev1.ConfigMapVolumeSource{
-                                    LocalObjectReference: corev1.LocalObjectReference{
-                                        Name: configMapName,
-                                    },
-                                },
-                            },
-                        },
-                    },
-                },
-            },
-        },
-    }
-
-    // Create the Job in the 'default' namespace - temporary.
-    _, err := clientset.BatchV1().Jobs("default").Create(ctx, job, metav1.CreateOptions{})
-    if err != nil {
-        return fmt.Errorf("failed to create Kubernetes Job: %v", err)
-    }
-
-    return nil
-}
-
-// createTerraformApplyJob creates a Kubernetes Job that runs 'terraform apply'.
-func createTerraformApplyJob(ctx context.Context, clientset *kubernetes.Clientset, jobName, configMapName string) error {
-    job := &batchv1.Job{
-        ObjectMeta: metav1.ObjectMeta{
-            Name: jobName,
-        },
-        Spec: batchv1.JobSpec{
-            Template: corev1.PodTemplateSpec{
-                ObjectMeta: metav1.ObjectMeta{
-                    Labels: map[string]string{
-                        "job-name": jobName,
-                    },
-                },
-                Spec: corev1.PodSpec{
-                    RestartPolicy: corev1.RestartPolicyNever,
-                    Containers: []corev1.Container{
-                        {
-                            Name:  "terraform",
-                            Image: "hashicorp/terraform:light",
-                            Command: []string{
-                                "sh",
-                                "-c",
-                                "terraform init && terraform apply -auto-approve",
-                            },
-                            WorkingDir: "/app/terraform",
-                            VolumeMounts: []corev1.VolumeMount{
-                                {
-                                    Name:      "terraform-config",
-                                    MountPath: "/app/terraform",
-                                },
-                            },
-                        },
-                    },
-                    Volumes: []corev1.Volume{
-                        {
-                            Name: "terraform-config",
-                            VolumeSource: corev1.VolumeSource{
-                                ConfigMap: &corev1.ConfigMapVolumeSource{
-                                    LocalObjectReference: corev1.LocalObjectReference{
-                                        Name: configMapName,
-                                    },
-                                },
-                            },
-                        },
-                    },
-                },
-            },
-        },
-    }
-
-    // Create the Job in the 'default' namespace - temporary.
-    _, err := clientset.BatchV1().Jobs("default").Create(ctx, job, metav1.CreateOptions{})
-    if err != nil {
-        return fmt.Errorf("failed to create Kubernetes Job: %v", err)
-    }
-
-    return nil
-}
-
 // getKubernetesClient initializes and returns a Kubernetes clientset.
 //func getKubernetesClient() (*kubernetes.Clientset, error) {
 //    // Try in-cluster config.
@@ -349,41 +231,40 @@ func (e *executor) createTerraformJob(ctx context.Context, jobName, configMapNam
 }
 
 // WaitForJobCompletion waits for the Kubernetes Job to complete. - Add Logger
-func WaitForJobCompletion(ctx context.Context, clientset *kubernetes.Clientset, jobName string, namespace string) error {
-    func (e *executor) waitForJobCompletion(ctx context.Context, jobName, namespace string) error {
-        watchInterface, err := e.clientset.BatchV1().Jobs(namespace).Watch(ctx, metav1.ListOptions{
-            FieldSelector: fmt.Sprintf("metadata.name=%s", jobName),
-        })
-        if err != nil {
-            return fmt.Errorf("failed to start watch on Job: %v", err)
-        }
-        defer watchInterface.Stop()
-    
-        for {
-            select {
-            case <-ctx.Done():
-                return fmt.Errorf("context canceled or timed out")
-            case event, ok := <-watchInterface.ResultChan():
-                if !ok {
-                    return fmt.Errorf("watch channel closed")
-                }
-                job, ok := event.Object.(*batchv1.Job)
-                if !ok {
-                    return fmt.Errorf("unexpected type received from watch")
-                }
-    
-                if job.Status.Succeeded > 0 {
-                    fmt.Println("Job completed successfully")
-                    return nil
-                }
-    
-                if job.Status.Failed > 0 {
-                    return fmt.Errorf("Job failed")
-                }
+func (e *executor) waitForJobCompletion(ctx context.Context, jobName, namespace string) error {
+    watchInterface, err := e.clientset.BatchV1().Jobs(namespace).Watch(ctx, metav1.ListOptions{
+        FieldSelector: fmt.Sprintf("metadata.name=%s", jobName),
+    })
+    if err != nil {
+        return fmt.Errorf("failed to start watch on Job: %v", err)
+    }
+    defer watchInterface.Stop()
+
+    for {
+        select {
+        case <-ctx.Done():
+            return fmt.Errorf("context canceled or timed out")
+        case event, ok := <-watchInterface.ResultChan():
+            if !ok {
+                return fmt.Errorf("watch channel closed")
+            }
+            job, ok := event.Object.(*batchv1.Job)
+            if !ok {
+                return fmt.Errorf("unexpected type received from watch")
+            }
+
+            if job.Status.Succeeded > 0 {
+                fmt.Println("Job completed successfully")
+                return nil
+            }
+
+            if job.Status.Failed > 0 {
+                return fmt.Errorf("Job failed")
             }
         }
     }
-}    
+}
+    
 
 func (e *executor) cleanupJobAndConfigMap(ctx context.Context, jobName, configMapName, namespace string) error {
     // Delete the Job
