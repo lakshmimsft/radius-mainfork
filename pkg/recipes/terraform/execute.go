@@ -33,79 +33,74 @@ import (
     "k8s.io/client-go/tools/clientcmd"
 )
 
-func Deploy(ctx context.Context, workingDir, recipeName string) error {
+// Deploy triggers a Kubernetes Job to run the Terraform commands for deploying the infrastructure.
+func (e *executor) Deploy(ctx context.Context, options Options) error {
+    // Validate options.
+    if options.WorkingDir == "" || options.RecipeName == "" || options.Namespace == "" {
+        return fmt.Errorf("missing required options")
+    }
+
     // Check if the working directory exists.
-    if _, err := os.Stat(workingDir); os.IsNotExist(err) {
+    if _, err := os.Stat(options.WorkingDir); os.IsNotExist(err) {
         return fmt.Errorf("working directory does not exist")
     }
 
-    // Initialize the Kubernetes client.
-    clientset, err := getKubernetesClient()
-    if err != nil {
-        return fmt.Errorf("failed to initialize Kubernetes client: %v", err)
-    }
-
     // Create a ConfigMap with the Terraform configuration.
-    configMapName := fmt.Sprintf("terraform-config-%s", recipeName)
-    if err := createConfigMap(ctx, clientset, configMapName, workingDir); err != nil {
+    configMapName := fmt.Sprintf("terraform-config-%s", options.RecipeName)
+    if err := e.createConfigMap(ctx, configMapName, options); err != nil {
         return fmt.Errorf("failed to create ConfigMap: %v", err)
     }
 
     // Create a Kubernetes Job to run the Terraform apply command.
-    jobName := fmt.Sprintf("terraform-apply-job-%s", recipeName)
-    if err := createTerraformApplyJob(ctx, clientset, jobName, configMapName); err != nil {
+    jobName := fmt.Sprintf("terraform-apply-job-%s", options.RecipeName)
+    if err := e.createTerraformJob(ctx, jobName, configMapName, "apply", options); err != nil {
         return fmt.Errorf("failed to create Kubernetes Job: %v", err)
     }
 
     // Wait for the Job to complete.
-    err = WaitForJobCompletion(ctx, clientset, jobName, "default")
-    if err != nil {
+    if err := e.waitForJobCompletion(ctx, jobName, options.Namespace); err != nil {
         return fmt.Errorf("deployment failed: %v", err)
     }
 
-    // clean up resources - keep for debugging
-    // err = cleanupJobAndConfigMap(ctx, clientset, jobName, configMapName, "default")
-    // if err != nil {
-    //     return fmt.Errorf("cleanup failed: %v", err)
-    // }
+    // Clean up resources.
+    //if err := e.cleanupJobAndConfigMap(ctx, jobName, configMapName, options.Namespace); err != nil {
+    //    return fmt.Errorf("cleanup failed: %v", err)
+    }
 
     return nil
 }
 
 // Delete triggers a Kubernetes Job to run the Terraform commands for destroying the infrastructure.
-func Delete(ctx context.Context, workingDir, recipeName string) error {
+func (e *executor) Delete(ctx context.Context, options Options) error {
+    // Validate options.
+    if options.WorkingDir == "" || options.RecipeName == "" || options.Namespace == "" {
+        return fmt.Errorf("missing required options")
+    }
+
     // Check if the working directory exists.
-    if _, err := os.Stat(workingDir); os.IsNotExist(err) {
+    if _, err := os.Stat(options.WorkingDir); os.IsNotExist(err) {
         return fmt.Errorf("working directory does not exist")
     }
 
-    // Initialize the Kubernetes client.
-    clientset, err := getKubernetesClient()
-    if err != nil {
-        return fmt.Errorf("failed to initialize Kubernetes client: %v", err)
-    }
-
     // Create a ConfigMap with the Terraform configuration.
-    configMapName := fmt.Sprintf("terraform-config-%s", recipeName)
-    if err := createConfigMap(ctx, clientset, configMapName, workingDir); err != nil {
+    configMapName := fmt.Sprintf("terraform-config-%s", options.RecipeName)
+    if err := e.createConfigMap(ctx, configMapName, options); err != nil {
         return fmt.Errorf("failed to create ConfigMap: %v", err)
     }
 
     // Create a Kubernetes Job to run the Terraform destroy command.
-    jobName := fmt.Sprintf("terraform-destroy-job-%s", recipeName)
-    if err := createTerraformDestroyJob(ctx, clientset, jobName, configMapName); err != nil {
+    jobName := fmt.Sprintf("terraform-destroy-job-%s", options.RecipeName)
+    if err := e.createTerraformJob(ctx, jobName, configMapName, "destroy", options); err != nil {
         return fmt.Errorf("failed to create Kubernetes Job: %v", err)
     }
 
     // Wait for the Job to complete.
-    err = WaitForJobCompletion(ctx, clientset, jobName, "default")
-    if err != nil {
+    if err := e.waitForJobCompletion(ctx, jobName, options.Namespace); err != nil {
         return fmt.Errorf("deletion failed: %v", err)
     }
 
     // Clean up resources.
-    err = cleanupJobAndConfigMap(ctx, clientset, jobName, configMapName, "default")
-    if err != nil {
+    if err := e.cleanupJobAndConfigMap(ctx, jobName, configMapName, options.Namespace); err != nil {
         return fmt.Errorf("cleanup failed: %v", err)
     }
 
@@ -231,31 +226,31 @@ func createTerraformApplyJob(ctx context.Context, clientset *kubernetes.Clientse
 }
 
 // getKubernetesClient initializes and returns a Kubernetes clientset.
-func getKubernetesClient() (*kubernetes.Clientset, error) {
-    // Try in-cluster config.
-    config, err := rest.InClusterConfig()
-    if err != nil {
-        // If not running in a cluster, use the default config (for local testing).
-        kubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
-        config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-        if err != nil {
-            return nil, fmt.Errorf("failed to create Kubernetes client configuration: %v", err)
-        }
-    }
-
-    // Create the clientset.
-    clientset, err := kubernetes.NewForConfig(config)
-    if err != nil {
-        return nil, fmt.Errorf("failed to create Kubernetes clientset: %v", err)
-    }
-
-    return clientset, nil
-}
+//func getKubernetesClient() (*kubernetes.Clientset, error) {
+//    // Try in-cluster config.
+//    config, err := rest.InClusterConfig()
+//    if err != nil {
+//        // If not running in a cluster, use the default config (for local testing).
+//        kubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
+//        config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+//        if err != nil {
+//            return nil, fmt.Errorf("failed to create Kubernetes client configuration: %v", err)
+//        }
+//    }
+//
+//    // Create the clientset.
+//    clientset, err := kubernetes.NewForConfig(config)
+//    if err != nil {
+//        return nil, fmt.Errorf("failed to create Kubernetes clientset: %v", err)
+//    }
+//
+//    return clientset, nil
+//}
 
 // createConfigMap creates a ConfigMap containing the Terraform configuration files.
-func createConfigMap(ctx context.Context, clientset *kubernetes.Clientset, configMapName, workingDir string) error {
+func (e *executor) createConfigMap(ctx context.Context, configMapName string, options Options) error {
     // Read all files in the working directory.
-    files, err := os.ReadDir(workingDir)
+    files, err := os.ReadDir(options.WorkingDir)
     if err != nil {
         return fmt.Errorf("failed to read working directory: %v", err)
     }
@@ -265,7 +260,7 @@ func createConfigMap(ctx context.Context, clientset *kubernetes.Clientset, confi
         if file.IsDir() {
             continue
         }
-        filePath := filepath.Join(workingDir, file.Name())
+        filePath := filepath.Join(options.WorkingDir, file.Name())
         content, err := os.ReadFile(filePath)
         if err != nil {
             return fmt.Errorf("failed to read file %s: %v", filePath, err)
@@ -275,25 +270,30 @@ func createConfigMap(ctx context.Context, clientset *kubernetes.Clientset, confi
 
     configMap := &corev1.ConfigMap{
         ObjectMeta: metav1.ObjectMeta{
-            Name: configMapName,
+            Name:      configMapName,
+            Namespace: options.Namespace,
         },
         Data: data,
     }
 
-    // Create the ConfigMap in the 'default' namespace.
-    _, err = clientset.CoreV1().ConfigMaps("default").Create(ctx, configMap, metav1.CreateOptions{})
+    // Create the ConfigMap in Kubernetes.
+    _, err = e.clientset.CoreV1().ConfigMaps(options.Namespace).Create(ctx, configMap, metav1.CreateOptions{})
     if err != nil {
         return fmt.Errorf("failed to create ConfigMap: %v", err)
     }
 
     return nil
-}
+} 
 
 // createTerraformJob creates a Kubernetes Job that runs Terraform commands.
-func createTerraformJob(ctx context.Context, clientset *kubernetes.Clientset, jobName, configMapName string) error {
+func (e *executor) createTerraformJob(ctx context.Context, jobName, configMapName, action string, options Options) error {
+    // action can be "apply" or "destroy"
+    command := fmt.Sprintf("terraform init && terraform %s -auto-approve", action)
+
     job := &batchv1.Job{
         ObjectMeta: metav1.ObjectMeta{
-            Name: jobName,
+            Name:      jobName,
+            Namespace: options.Namespace,
         },
         Spec: batchv1.JobSpec{
             Template: corev1.PodTemplateSpec{
@@ -311,7 +311,7 @@ func createTerraformJob(ctx context.Context, clientset *kubernetes.Clientset, jo
                             Command: []string{
                                 "sh",
                                 "-c",
-                                "terraform init && terraform apply -auto-approve",
+                                command,
                             },
                             WorkingDir: "/app/terraform",
                             VolumeMounts: []corev1.VolumeMount{
@@ -339,73 +339,126 @@ func createTerraformJob(ctx context.Context, clientset *kubernetes.Clientset, jo
         },
     }
 
-    // Create the Job in the 'default' namespace.
-    _, err := clientset.BatchV1().Jobs("default").Create(ctx, job, metav1.CreateOptions{})
+    // Create the Job in Kubernetes.
+    _, err := e.clientset.BatchV1().Jobs(options.Namespace).Create(ctx, job, metav1.CreateOptions{})
     if err != nil {
         return fmt.Errorf("failed to create Kubernetes Job: %v", err)
     }
-
-    // Wait for the Job to complete
-    err = WaitForJobCompletion(ctx, clientset, jobName, "default")
-    if err != nil {
-        return fmt.Errorf("deployment failed: %v", err)
-    }
-
-    // err = cleanupJobAndConfigMap(ctx, clientset, jobName, configMapName, "default")
-    // if err != nil {
-    //     return fmt.Errorf("cleanup failed: %v", err)
-    // }
 
     return nil
 }
 
 // WaitForJobCompletion waits for the Kubernetes Job to complete. - Add Logger
 func WaitForJobCompletion(ctx context.Context, clientset *kubernetes.Clientset, jobName string, namespace string) error {
-    watchInterface, err := clientset.BatchV1().Jobs(namespace).Watch(ctx, metav1.ListOptions{
-        FieldSelector: fmt.Sprintf("metadata.name=%s", jobName),
-    })
-    if err != nil {
-        return fmt.Errorf("failed to start watch on Job: %v", err)
-    }
-    defer watchInterface.Stop()
-
-    for {
-        select {
-        case <-ctx.Done():
-            return fmt.Errorf("context canceled or timed out")
-        case event, ok := <-watchInterface.ResultChan():
-            if !ok {
-                return fmt.Errorf("watch channel closed")
-            }
-            job, ok := event.Object.(*batchv1.Job)
-            if !ok {
-                return fmt.Errorf("unexpected type received from watch")
-            }
-
-            if job.Status.Succeeded > 0 {
-                fmt.Println("Job completed successfully")
-                return nil
-            }
-
-            if job.Status.Failed > 0 {
-                return fmt.Errorf("Job failed")
+    func (e *executor) waitForJobCompletion(ctx context.Context, jobName, namespace string) error {
+        watchInterface, err := e.clientset.BatchV1().Jobs(namespace).Watch(ctx, metav1.ListOptions{
+            FieldSelector: fmt.Sprintf("metadata.name=%s", jobName),
+        })
+        if err != nil {
+            return fmt.Errorf("failed to start watch on Job: %v", err)
+        }
+        defer watchInterface.Stop()
+    
+        for {
+            select {
+            case <-ctx.Done():
+                return fmt.Errorf("context canceled or timed out")
+            case event, ok := <-watchInterface.ResultChan():
+                if !ok {
+                    return fmt.Errorf("watch channel closed")
+                }
+                job, ok := event.Object.(*batchv1.Job)
+                if !ok {
+                    return fmt.Errorf("unexpected type received from watch")
+                }
+    
+                if job.Status.Succeeded > 0 {
+                    fmt.Println("Job completed successfully")
+                    return nil
+                }
+    
+                if job.Status.Failed > 0 {
+                    return fmt.Errorf("Job failed")
+                }
             }
         }
     }
-}
+}    
 
-func cleanupJobAndConfigMap(ctx context.Context, clientset *kubernetes.Clientset, jobName, configMapName, namespace string) error {
+func (e *executor) cleanupJobAndConfigMap(ctx context.Context, jobName, configMapName, namespace string) error {
     // Delete the Job
-    err := clientset.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{})
+    err := e.clientset.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{})
     if err != nil {
         return fmt.Errorf("failed to delete Job: %v", err)
     }
 
     // Delete the ConfigMap
-    err = clientset.CoreV1().ConfigMaps(namespace).Delete(ctx, configMapName, metav1.DeleteOptions{})
+    err = e.clientset.CoreV1().ConfigMaps(namespace).Delete(ctx, configMapName, metav1.DeleteOptions{})
     if err != nil {
         return fmt.Errorf("failed to delete ConfigMap: %v", err)
     }
 
     return nil
 }
+    
+/*
+func NewExecutor(clientset *kubernetes.Clientset) *executor {
+    return &executor{
+        clientset: clientset,
+        // Initialize other fields if necessary.
+    }
+}
+
+// driver
+type TerraformDriver struct {
+    clientset *kubernetes.Clientset
+}
+
+func NewTerraformDriver(clientset *kubernetes.Clientset) *TerraformDriver {
+    return &TerraformDriver{
+        clientset: clientset,
+    }
+}
+
+func (d *TerraformDriver) Execute(ctx context.Context, cfg recipes.RecipeConfig) error {
+    exec := terraform.NewExecutor(d.clientset)
+
+    options := terraform.Options{
+        WorkingDir: cfg.WorkingDir,
+        RecipeName: cfg.RecipeName,
+        Namespace:  cfg.Namespace, // Assuming Namespace is part of RecipeConfig
+        // Set other options as necessary.
+    }
+
+    return exec.Deploy(ctx, options)
+}
+
+func (d *TerraformDriver) Destroy(ctx context.Context, cfg recipes.RecipeConfig) error {
+    exec := terraform.NewExecutor(d.clientset)
+
+    options := terraform.Options{
+        WorkingDir: cfg.WorkingDir,
+        RecipeName: cfg.RecipeName,
+        Namespace:  cfg.Namespace,
+        // Set other options as necessary.
+    }
+
+    return exec.Delete(ctx, options)
+}
+
+// engine
+func RunRecipe(ctx context.Context, cfg recipes.RecipeConfig) error {
+    // Initialize the Kubernetes client.
+    kubeClient, err := kubernetes.NewClient()
+    if err != nil {
+        return err
+    }
+
+    // Initialize the TerraformDriver.
+    terraformDriver := driver.NewTerraformDriver(kubeClient.Clientset)
+
+    // Execute the recipe.
+    return terraformDriver.Execute(ctx, cfg)
+}
+
+*/
