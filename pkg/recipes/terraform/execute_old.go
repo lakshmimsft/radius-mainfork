@@ -36,7 +36,6 @@ import (
 	ucp_provider "github.com/radius-project/radius/pkg/ucp/secret/provider"
 	"github.com/radius-project/radius/pkg/ucp/ucplog"
 	"go.opentelemetry.io/otel/attribute"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -63,113 +62,116 @@ type executor struct {
 	k8sClientSet kubernetes.Interface
 }
 
+/*
 // Deploy installs Terraform, creates a working directory, generates a config, and runs Terraform init and
 // apply in the working directory, returning an error if any of these steps fail.
-func (e *executor) Deploy(ctx context.Context, options Options) (*tfjson.State, error) {
-	logger := ucplog.FromContextOrDiscard(ctx)
 
-	// Install Terraform
-	i := install.NewInstaller()
-	tf, err := Install(ctx, i, options.RootDir)
-	// The terraform zip for installation is downloaded in a location outside of the install directory and is only accessible through the installer.Remove function -
-	// stored in latestVersion.pathsToRemove. So this needs to be called for complete cleanup even if the root terraform directory is deleted.
-	defer func() {
-		if err := i.Remove(ctx); err != nil {
-			logger.Info(fmt.Sprintf("Failed to cleanup Terraform installation: %s", err.Error()))
-		}
-	}()
-	if err != nil {
-		return nil, err
-	}
+	func (e *executor) Deploy(ctx context.Context, options Options) (*tfjson.State, error) {
+		logger := ucplog.FromContextOrDiscard(ctx)
 
-	// Create Terraform config in the working directory
-	kubernetesBackendSuffix, err := e.generateConfig(ctx, tf, options)
-	if err != nil {
-		return nil, err
-	}
-
-	if options.EnvConfig != nil {
-		// Set environment variables for the Terraform process.
-		err = e.setEnvironmentVariables(tf, options)
+		// Install Terraform
+		i := install.NewInstaller()
+		tf, err := Install(ctx, i, options.RootDir)
+		// The terraform zip for installation is downloaded in a location outside of the install directory and is only accessible through the installer.Remove function -
+		// stored in latestVersion.pathsToRemove. So this needs to be called for complete cleanup even if the root terraform directory is deleted.
+		defer func() {
+			if err := i.Remove(ctx); err != nil {
+				logger.Info(fmt.Sprintf("Failed to cleanup Terraform installation: %s", err.Error()))
+			}
+		}()
 		if err != nil {
 			return nil, err
 		}
-	}
 
-	// Run TF Init and Apply in the working directory
-	state, err := initAndApply(ctx, tf)
-	if err != nil {
-		return nil, err
-	}
+		// Create Terraform config in the working directory
+		kubernetesBackendSuffix, err := e.generateConfig(ctx, tf, options)
+		if err != nil {
+			return nil, err
+		}
 
-	// Validate that the terraform state file backend source exists.
-	// Currently only Kubernetes secret backend is supported, which is created by Terraform as a part of Terraform apply.
-	backendExists, err := backends.NewKubernetesBackend(e.k8sClientSet).ValidateBackendExists(ctx, backends.KubernetesBackendNamePrefix+kubernetesBackendSuffix)
-	if err != nil {
-		return nil, fmt.Errorf("error retrieving kubernetes secret for terraform state: %w", err)
-	} else if !backendExists {
-		return nil, errors.New("expected kubernetes secret for terraform state is not found")
-	}
+		if options.EnvConfig != nil {
+			// Set environment variables for the Terraform process.
+			err = e.setEnvironmentVariables(tf, options)
+			if err != nil {
+				return nil, err
+			}
+		}
 
-	return state, nil
-}
+		// Run TF Init and Apply in the working directory
+		state, err := initAndApply(ctx, tf)
+		if err != nil {
+			return nil, err
+		}
+
+		// Validate that the terraform state file backend source exists.
+		// Currently only Kubernetes secret backend is supported, which is created by Terraform as a part of Terraform apply.
+		backendExists, err := backends.NewKubernetesBackend(e.k8sClientSet).ValidateBackendExists(ctx, backends.KubernetesBackendNamePrefix+kubernetesBackendSuffix)
+		if err != nil {
+			return nil, fmt.Errorf("error retrieving kubernetes secret for terraform state: %w", err)
+		} else if !backendExists {
+			return nil, errors.New("expected kubernetes secret for terraform state is not found")
+		}
+
+		return state, nil
+	}
 
 // Delete installs Terraform, creates a working directory, generates a config, and runs Terraform destroy
 // in the working directory, returning an error if any of these steps fail.
-func (e *executor) Delete(ctx context.Context, options Options) error {
-	logger := ucplog.FromContextOrDiscard(ctx)
 
-	// Install Terraform
-	i := install.NewInstaller()
-	tf, err := Install(ctx, i, options.RootDir)
-	// The terraform zip for installation is downloaded in a location outside of the install directory and is only accessible through the installer.Remove function -
-	// stored in latestVersion.pathsToRemove. So this needs to be called for complete cleanup even if the root terraform directory is deleted.
-	defer func() {
-		if err := i.Remove(ctx); err != nil {
-			logger.Info(fmt.Sprintf("Failed to cleanup Terraform installation: %s", err.Error()))
+	func (e *executor) Delete(ctx context.Context, options Options) error {
+		logger := ucplog.FromContextOrDiscard(ctx)
+
+		// Install Terraform
+		i := install.NewInstaller()
+		tf, err := Install(ctx, i, options.RootDir)
+		// The terraform zip for installation is downloaded in a location outside of the install directory and is only accessible through the installer.Remove function -
+		// stored in latestVersion.pathsToRemove. So this needs to be called for complete cleanup even if the root terraform directory is deleted.
+		defer func() {
+			if err := i.Remove(ctx); err != nil {
+				logger.Info(fmt.Sprintf("Failed to cleanup Terraform installation: %s", err.Error()))
+			}
+		}()
+		if err != nil {
+			return err
 		}
-	}()
-	if err != nil {
-		return err
-	}
 
-	// Create Terraform config in the working directory
-	kubernetesBackendSuffix, err := e.generateConfig(ctx, tf, options)
-	if err != nil {
-		return err
-	}
+		// Create Terraform config in the working directory
+		kubernetesBackendSuffix, err := e.generateConfig(ctx, tf, options)
+		if err != nil {
+			return err
+		}
 
-	// Before running terraform init and destroy, ensure that the Terraform state file storage source exists.
-	// If the state file source has been deleted or wasn't created due to a failure during apply then
-	// terraform initialization will fail due to missing backend source.
-	backendExists, err := backends.NewKubernetesBackend(e.k8sClientSet).ValidateBackendExists(ctx, backends.KubernetesBackendNamePrefix+kubernetesBackendSuffix)
-	if err != nil {
-		// Continue with the delete flow for all errors other than backend not found.
-		// If it is an intermittent error then the delete flow will fail and should be retried from the client.
-		logger.Info(fmt.Sprintf("Error retrieving Terraform state file backend: %s", err.Error()))
-	} else if !backendExists {
-		// Skip deletion if the backend does not exist. Delete can't be performed without Terraform state file.
-		logger.Info("Skipping deletion of recipe resources: Terraform state file backend does not exist.")
+		// Before running terraform init and destroy, ensure that the Terraform state file storage source exists.
+		// If the state file source has been deleted or wasn't created due to a failure during apply then
+		// terraform initialization will fail due to missing backend source.
+		backendExists, err := backends.NewKubernetesBackend(e.k8sClientSet).ValidateBackendExists(ctx, backends.KubernetesBackendNamePrefix+kubernetesBackendSuffix)
+		if err != nil {
+			// Continue with the delete flow for all errors other than backend not found.
+			// If it is an intermittent error then the delete flow will fail and should be retried from the client.
+			logger.Info(fmt.Sprintf("Error retrieving Terraform state file backend: %s", err.Error()))
+		} else if !backendExists {
+			// Skip deletion if the backend does not exist. Delete can't be performed without Terraform state file.
+			logger.Info("Skipping deletion of recipe resources: Terraform state file backend does not exist.")
+			return nil
+		}
+
+		// Run TF Destroy in the working directory to delete the resources deployed by the recipe
+		err = initAndDestroy(ctx, tf)
+		if err != nil {
+			return err
+		}
+
+		// Delete the kubernetes secret created for terraform state file.
+		err = e.k8sClientSet.CoreV1().
+			Secrets(backends.RadiusNamespace).
+			Delete(ctx, backends.KubernetesBackendNamePrefix+kubernetesBackendSuffix, metav1.DeleteOptions{})
+		if err != nil {
+			return fmt.Errorf("error deleting kubernetes secret for terraform state: %w", err)
+		}
+
 		return nil
 	}
-
-	// Run TF Destroy in the working directory to delete the resources deployed by the recipe
-	err = initAndDestroy(ctx, tf)
-	if err != nil {
-		return err
-	}
-
-	// Delete the kubernetes secret created for terraform state file.
-	err = e.k8sClientSet.CoreV1().
-		Secrets(backends.RadiusNamespace).
-		Delete(ctx, backends.KubernetesBackendNamePrefix+kubernetesBackendSuffix, metav1.DeleteOptions{})
-	if err != nil {
-		return fmt.Errorf("error deleting kubernetes secret for terraform state: %w", err)
-	}
-
-	return nil
-}
-
+*/
 func (e *executor) GetRecipeMetadata(ctx context.Context, options Options) (map[string]any, error) {
 	logger := ucplog.FromContextOrDiscard(ctx)
 
