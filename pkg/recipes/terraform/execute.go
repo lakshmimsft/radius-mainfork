@@ -18,42 +18,89 @@ package terraform
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
+	install "github.com/hashicorp/hc-install"
+	tfjson "github.com/hashicorp/terraform-json"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // Deploy triggers a Kubernetes Job to run the Terraform commands for deploying the infrastructure.
-func (e *executor) Deploy(ctx context.Context, options Options) error {
+func (e *executor) Deploy(ctx context.Context, options Options) (*tfjson.State, error) {
 	// Validate options.
-	if options.RootDir == "" || options.RecipeName == "" || options.Namespace == "" {
-		return fmt.Errorf("missing required options")
+	if options.RootDir == "" || options.EnvRecipe.TemplatePath == "" || options.Namespace == "" {
+		return nil, fmt.Errorf("missing required options")
 	}
 
 	// Check if the working directory exists.
 	if _, err := os.Stat(options.RootDir); os.IsNotExist(err) {
-		return fmt.Errorf("working directory does not exist")
+		return nil, fmt.Errorf("working directory does not exist")
+	}
+
+	// Install Terraform
+	i := install.NewInstaller()
+	tf, err := Install(ctx, i, options.RootDir)
+	defer func() {
+		if err := i.Remove(ctx); err != nil {
+			log.Println(fmt.Errorf("failed to cleanup terraform installation: %s", err.Error()))
+		}
+	}()
+	if err != nil {
+		return nil, err
+	}
+
+	// Create Terraform config in the working directory
+	_, err = e.generateConfig(ctx, tf, options)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if the Persistent Volume exists.
+	_, err = e.k8sClientSet.CoreV1().PersistentVolumes().Get(ctx, "terraform-pv", metav1.GetOptions{})
+	if err != nil {
+		// Create the Persistent Volume if it does not exist.
+		if err := e.createPersistentVolume(ctx); err != nil {
+			return nil, fmt.Errorf("failed to create Persistent Volume: %v", err)
+		}
+	}
+
+	// Check if the Persistent Volume Claim exists.
+	_, err = e.k8sClientSet.CoreV1().PersistentVolumeClaims(options.Namespace).Get(ctx, "terraform-pvc", metav1.GetOptions{})
+	if err != nil {
+		// Create the Persistent Volume Claim if it does not exist.
+		if err := e.createPersistentVolumeClaim(ctx, options.Namespace); err != nil {
+			return nil, fmt.Errorf("failed to create Persistent Volume Claim: %v", err)
+		}
 	}
 
 	// Create a ConfigMap with the Terraform configuration.
-	configMapName := fmt.Sprintf("terraform-config-%s", options.RecipeName)
+	configMapName := fmt.Sprintf("terraform-config-%s", options.EnvRecipe.Name)
 	if err := e.createConfigMap(ctx, configMapName, options); err != nil {
-		return fmt.Errorf("failed to create ConfigMap: %v", err)
+		return nil, fmt.Errorf("failed to create ConfigMap: %v", err)
 	}
 
 	// Create a Kubernetes Job to run the Terraform apply command.
-	jobName := fmt.Sprintf("terraform-apply-job-%s", options.RecipeName)
-	if err := e.createTerraformJob(ctx, jobName, configMapName, "apply", options); err != nil {
-		return fmt.Errorf("failed to create Kubernetes Job: %v", err)
+	jobName := fmt.Sprintf("terraform-apply-job-%s", options.EnvRecipe.Name)
+
+	if err := e.createTerraformJob(ctx, jobName, configMapName, "apply -state=/app/terraform/state/terraform.tfstate", options); err != nil {
+		return nil, fmt.Errorf("failed to create Kubernetes Job: %v", err)
 	}
 
 	// Wait for the Job to complete.
 	if err := e.waitForJobCompletion(ctx, jobName, options.Namespace); err != nil {
-		return fmt.Errorf("deployment failed: %v", err)
+		return nil, fmt.Errorf("deployment failed: %v", err)
+	}
+
+	state, err := e.retrieveTerraformOutputs(ctx, options)
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving terraform outputs: %v", err)
 	}
 
 	// Clean up resources.
@@ -61,13 +108,13 @@ func (e *executor) Deploy(ctx context.Context, options Options) error {
 	//    return fmt.Errorf("cleanup failed: %v", err)
 	//}
 
-	return nil
+	return state, nil
 }
 
 // Delete triggers a Kubernetes Job to run the Terraform commands for destroying the infrastructure.
 func (e *executor) Delete(ctx context.Context, options Options) error {
 	// Validate options.
-	if options.RootDir == "" || options.RecipeName == "" || options.Namespace == "" {
+	if options.RootDir == "" || options.EnvRecipe.TemplatePath == "" || options.Namespace == "" {
 		return fmt.Errorf("missing required options")
 	}
 
@@ -77,13 +124,13 @@ func (e *executor) Delete(ctx context.Context, options Options) error {
 	}
 
 	// Create a ConfigMap with the Terraform configuration.
-	configMapName := fmt.Sprintf("terraform-config-%s", options.RecipeName)
+	configMapName := fmt.Sprintf("terraform-config-%s", options.EnvRecipe.Name)
 	if err := e.createConfigMap(ctx, configMapName, options); err != nil {
 		return fmt.Errorf("failed to create ConfigMap: %v", err)
 	}
 
 	// Create a Kubernetes Job to run the Terraform destroy command.
-	jobName := fmt.Sprintf("terraform-destroy-job-%s", options.RecipeName)
+	jobName := fmt.Sprintf("terraform-destroy-job-%s", options.EnvRecipe.Name)
 	if err := e.createTerraformJob(ctx, jobName, configMapName, "destroy", options); err != nil {
 		return fmt.Errorf("failed to create Kubernetes Job: %v", err)
 	}
@@ -93,6 +140,13 @@ func (e *executor) Delete(ctx context.Context, options Options) error {
 		return fmt.Errorf("deletion failed: %v", err)
 	}
 
+	// Retrieve Terraform outputs
+	outputs, err := e.retrieveTerraformOutputs(ctx, options)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve Terraform outputs: %v", err)
+	}
+	fmt.Printf("Terraform Outputs:\n%v\n", outputs)
+
 	// Clean up resources.
 	if err := e.cleanupJobAndConfigMap(ctx, jobName, configMapName, options.Namespace); err != nil {
 		return fmt.Errorf("cleanup failed: %v", err)
@@ -101,30 +155,10 @@ func (e *executor) Delete(ctx context.Context, options Options) error {
 	return nil
 }
 
-// getKubernetesClient initializes and returns a Kubernetes clientset.
-//func getKubernetesClient() (*kubernetes.Clientset, error) {
-//    // Try in-cluster config.
-//    config, err := rest.InClusterConfig()
-//    if err != nil {
-//        // If not running in a cluster, use the default config (for local testing).
-//        kubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
-//        config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-//        if err != nil {
-//            return nil, fmt.Errorf("failed to create Kubernetes client configuration: %v", err)
-//        }
-//    }
-//
-//    // Create the clientset.
-//    clientset, err := kubernetes.NewForConfig(config)
-//    if err != nil {
-//        return nil, fmt.Errorf("failed to create Kubernetes clientset: %v", err)
-//    }
-//
-//    return clientset, nil
-//}
-
 // createConfigMap creates a ConfigMap containing the Terraform configuration files.
 func (e *executor) createConfigMap(ctx context.Context, configMapName string, options Options) error {
+	configMapClient := e.k8sClientSet.CoreV1().ConfigMaps(options.Namespace)
+
 	// Read all files in the working directory.
 	files, err := os.ReadDir(options.RootDir)
 	if err != nil {
@@ -151,9 +185,15 @@ func (e *executor) createConfigMap(ctx context.Context, configMapName string, op
 		},
 		Data: data,
 	}
-
+	/*
+		// Delete the existing ConfigMap if it exists
+		err = configMapClient.Delete(ctx, configMapName, metav1.DeleteOptions{})
+		if err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete existing ConfigMap: %v", err)
+		}
+	*/
 	// Create the ConfigMap in Kubernetes.
-	_, err = e.clientset.CoreV1().ConfigMaps(options.Namespace).Create(ctx, configMap, metav1.CreateOptions{})
+	_, err = configMapClient.Create(ctx, configMap, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to create ConfigMap: %v", err)
 	}
@@ -164,7 +204,17 @@ func (e *executor) createConfigMap(ctx context.Context, configMapName string, op
 // createTerraformJob creates a Kubernetes Job that runs Terraform commands.
 func (e *executor) createTerraformJob(ctx context.Context, jobName, configMapName, action string, options Options) error {
 	// action can be "apply" or "destroy"
-	command := fmt.Sprintf("terraform init && terraform %s -auto-approve", action)
+	// command := fmt.Sprintf("cd /app/terraform && terraform init && terraform %s -auto-approve", action)
+	command := fmt.Sprintf(`
+	echo "Starting Terraform %s" &&
+	cd /app/terraform &&
+	echo "Listing files in /app/terraform:" &&
+	ls -l /app/terraform &&
+	echo "Running terraform init" &&
+	terraform init &&
+	echo "Running terraform %s" &&
+	terraform %s -state=/app/terraform/state/terraform.tfstate -auto-approve &&
+	echo "Terraform %s completed"`, action, action, action, action)
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -189,13 +239,17 @@ func (e *executor) createTerraformJob(ctx context.Context, jobName, configMapNam
 								"-c",
 								command,
 							},
-							RootDir: "/app/terraform",
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "terraform-config",
 									MountPath: "/app/terraform",
 								},
+								{
+									Name:      "terraform-state",
+									MountPath: "/app/terraform/state",
+								},
 							},
+							WorkingDir: "/app/terraform",
 						},
 					},
 					Volumes: []corev1.Volume{
@@ -209,6 +263,14 @@ func (e *executor) createTerraformJob(ctx context.Context, jobName, configMapNam
 								},
 							},
 						},
+						{
+							Name: "terraform-state",
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: "terraform-pvc",
+								},
+							},
+						},
 					},
 				},
 			},
@@ -216,7 +278,7 @@ func (e *executor) createTerraformJob(ctx context.Context, jobName, configMapNam
 	}
 
 	// Create the Job in Kubernetes.
-	_, err := e.clientset.BatchV1().Jobs(options.Namespace).Create(ctx, job, metav1.CreateOptions{})
+	_, err := e.k8sClientSet.BatchV1().Jobs(options.Namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to create Kubernetes Job: %v", err)
 	}
@@ -226,7 +288,7 @@ func (e *executor) createTerraformJob(ctx context.Context, jobName, configMapNam
 
 // WaitForJobCompletion waits for the Kubernetes Job to complete. - Add Logger
 func (e *executor) waitForJobCompletion(ctx context.Context, jobName, namespace string) error {
-	watchInterface, err := e.clientset.BatchV1().Jobs(namespace).Watch(ctx, metav1.ListOptions{
+	watchInterface, err := e.k8sClientSet.BatchV1().Jobs(namespace).Watch(ctx, metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("metadata.name=%s", jobName),
 	})
 	if err != nil {
@@ -261,18 +323,83 @@ func (e *executor) waitForJobCompletion(ctx context.Context, jobName, namespace 
 
 func (e *executor) cleanupJobAndConfigMap(ctx context.Context, jobName, configMapName, namespace string) error {
 	// Delete the Job
-	err := e.clientset.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{})
+	err := e.k8sClientSet.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to delete Job: %v", err)
 	}
 
 	// Delete the ConfigMap
-	err = e.clientset.CoreV1().ConfigMaps(namespace).Delete(ctx, configMapName, metav1.DeleteOptions{})
+	err = e.k8sClientSet.CoreV1().ConfigMaps(namespace).Delete(ctx, configMapName, metav1.DeleteOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to delete ConfigMap: %v", err)
 	}
 
 	return nil
+}
+
+func (e *executor) createPersistentVolume(ctx context.Context) error {
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "terraform-pv",
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			Capacity: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			},
+			AccessModes: []corev1.PersistentVolumeAccessMode{
+				corev1.ReadWriteOnce,
+			},
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: "/mnt/data/terraform",
+				},
+			},
+		},
+	}
+
+	_, err := e.k8sClientSet.CoreV1().PersistentVolumes().Create(ctx, pv, metav1.CreateOptions{})
+	return err
+}
+
+func (e *executor) createPersistentVolumeClaim(ctx context.Context, namespace string) error {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "terraform-pvc",
+			Namespace: namespace,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{
+				corev1.ReadWriteOnce,
+			},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("1Gi"),
+				},
+			},
+		},
+	}
+
+	_, err := e.k8sClientSet.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	return err
+}
+
+func (e *executor) retrieveTerraformOutputs(ctx context.Context, options Options) (*tfjson.State, error) {
+	// Define the path to the state file
+	stateFilePath := "/app/terraform/state/terraform.tfstate"
+
+	// Read the state file
+	stateFile, err := os.ReadFile(stateFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read state file: %v", err)
+	}
+
+	// Parse the state file
+	var state tfjson.State
+	if err := json.Unmarshal(stateFile, &state); err != nil {
+		return nil, fmt.Errorf("failed to parse state file: %v", err)
+	}
+
+	return &state, nil
 }
 
 /*
@@ -333,6 +460,60 @@ func RunRecipe(ctx context.Context, cfg recipes.RecipeConfig) error {
 
     // Execute the recipe.
     return terraformDriver.Execute(ctx, cfg)
+}
+
+
+// deleteStateFile deletes the Terraform state file.
+func (e *executor) deleteStateFile(ctx context.Context) error {
+    // Define the path to the state file
+    stateFilePath := "/app/terraform/state/terraform.tfstate"
+
+    // Check if the state file exists
+    if _, err := os.Stat(stateFilePath); os.IsNotExist(err) {
+        return fmt.Errorf("state file does not exist at path: %s", stateFilePath)
+    }
+
+    // Delete the state file
+    if err := os.Remove(stateFilePath); err != nil {
+        return fmt.Errorf("failed to delete state file: %v", err)
+    }
+
+    fmt.Printf("State file deleted successfully: %s\n", stateFilePath)
+    return nil
+}
+
+
+func (e *executor) createOrReplaceConfigMap(ctx context.Context, configMapName string, options Options) error {
+    configMapClient := e.k8sClientSet.CoreV1().ConfigMaps(options.Namespace)
+
+    // Define the ConfigMap data
+    configMapData := map[string]string{
+        // Add your configuration data here
+        "main.tf": "content of your main.tf file",
+    }
+
+    // Create the ConfigMap object
+    configMap := &corev1.ConfigMap{
+        ObjectMeta: metav1.ObjectMeta{
+            Name:      configMapName,
+            Namespace: options.Namespace,
+        },
+        Data: configMapData,
+    }
+
+    // Delete the existing ConfigMap if it exists
+    err := configMapClient.Delete(ctx, configMapName, metav1.DeleteOptions{})
+    if err != nil && !errors.IsNotFound(err) {
+        return fmt.Errorf("failed to delete existing ConfigMap: %v", err)
+    }
+
+    // Create the new ConfigMap
+    _, err = configMapClient.Create(ctx, configMap, metav1.CreateOptions{})
+    if err != nil {
+        return fmt.Errorf("failed to create ConfigMap: %v", err)
+    }
+
+    return nil
 }
 
 */

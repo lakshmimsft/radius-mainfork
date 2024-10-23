@@ -51,6 +51,9 @@ type TerraformExecutor interface {
 
 // Options represents the options required to build inputs to interact with Terraform.
 type Options struct {
+	// Namespace is the namespace where the Terraform execution pod is run.
+	Namespace string
+
 	// RootDir is the root directory of where Terraform is installed and executed for a specific recipe deployment/deletion request.
 	RootDir string
 

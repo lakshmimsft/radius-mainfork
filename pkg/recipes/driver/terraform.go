@@ -98,6 +98,7 @@ func (d *terraformDriver) Execute(ctx context.Context, opts ExecuteOptions) (*re
 	}
 
 	tfState, err := d.terraformExecutor.Deploy(ctx, terraform.Options{
+		Namespace:      "radius-system", // move to const unless this needs to be configured elsewhere
 		RootDir:        requestDirPath,
 		EnvConfig:      &opts.Configuration,
 		ResourceRecipe: &opts.Recipe,

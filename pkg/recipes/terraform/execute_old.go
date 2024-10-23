@@ -22,12 +22,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	install "github.com/hashicorp/hc-install"
 	"github.com/hashicorp/terraform-exec/tfexec"
-	tfjson "github.com/hashicorp/terraform-json"
-	"github.com/radius-project/radius/pkg/metrics"
 	"github.com/radius-project/radius/pkg/recipes/recipecontext"
 	"github.com/radius-project/radius/pkg/recipes/terraform/config"
 	"github.com/radius-project/radius/pkg/recipes/terraform/config/backends"
@@ -35,7 +32,6 @@ import (
 	"github.com/radius-project/radius/pkg/sdk"
 	ucp_provider "github.com/radius-project/radius/pkg/ucp/secret/provider"
 	"github.com/radius-project/radius/pkg/ucp/ucplog"
-	"go.opentelemetry.io/otel/attribute"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -357,6 +353,7 @@ func getTerraformConfig(ctx context.Context, workingDir string, options Options)
 	return tfConfig, nil
 }
 
+/*
 // initAndApply runs Terraform init and apply in the provided working directory.
 func initAndApply(ctx context.Context, tf *tfexec.Terraform) (*tfjson.State, error) {
 	logger := ucplog.FromContextOrDiscard(ctx)
@@ -407,3 +404,4 @@ func initAndDestroy(ctx context.Context, tf *tfexec.Terraform) error {
 
 	return nil
 }
+*/
