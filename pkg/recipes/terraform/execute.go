@@ -62,8 +62,19 @@ func (e *executor) Deploy(ctx context.Context, options Options) (*tfjson.State, 
 		return nil, err
 	}
 
-	// Check if the Persistent Volume exists.
-	_, err = e.k8sClientSet.CoreV1().PersistentVolumes().Get(ctx, "terraform-pv", metav1.GetOptions{})
+    // Assuming clientset and restconfig are already initialized
+    namespace := "default"
+    podName := "data-loader-pod"
+    containerName := "data-loader"
+    localPath := options.RootDir // The path to your local data
+    remotePath := "/mnt/terraform-config" // The path in the pod where the PVC is mounted
+
+	// Step 1: Create the 'terraform-config-pvc' if it doesn't exist
+    err := t.createConfigPVC()
+    if err != nil {
+        return fmt.Errorf("failed to create config PVC: %v", err)
+    }
+
 	if err != nil {
 		// Create the Persistent Volume if it does not exist.
 		if err := e.createPersistentVolume(ctx); err != nil {
@@ -79,15 +90,48 @@ func (e *executor) Deploy(ctx context.Context, options Options) (*tfjson.State, 
 			return nil, fmt.Errorf("failed to create Persistent Volume Claim: %v", err)
 		}
 	}
-	/*
-		// Create a ConfigMap with the Terraform configuration.
-		configMapName := fmt.Sprintf("terraform-config-%s", options.EnvRecipe.Name)
-		if err := e.createConfigMap(ctx, configMapName, options); err != nil {
-			return nil, fmt.Errorf("failed to create ConfigMap: %v", err)
-		}
-	*/
+
+    // Step 2: Create the data loader pod
+    err = t.createDataLoaderPod()
+    if err != nil {
+        return fmt.Errorf("failed to create data loader pod: %v", err)
+    }
+
+    // Step 3: Wait for the data loader pod to be running
+    err = t.waitForPodRunning("data-loader-pod")
+    if err != nil {
+        return fmt.Errorf("data loader pod is not running: %v", err)
+    }
+
+    // Step 4: Copy data to the pod
+    localPath := t.Options.RootDir // Adjust based on your struct
+    err = copyToPod(t.Clientset, t.RestConfig, t.Namespace, "data-loader-pod", "data-loader", localPath, "/mnt/terraform-config")
+    if err != nil {
+        return fmt.Errorf("failed to copy data to pod: %v", err)
+    }
+
+	// Step 5: Optionally verify the data in the pod
+	stdout, stderr, err := execCommand(t.Clientset, t.RestConfig, t.Namespace, "data-loader-pod", "data-loader", []string{"ls", "/mnt/terraform-config"})
+	if err != nil {
+		return fmt.Errorf("failed to execute command in pod: %v", err)
+	}
+	fmt.Printf("Data in pod:\n%s\nErrors:\n%s\n", stdout, stderr)
+
+	// Step 6: Delete the data loader pod if it's no longer needed
+	err = t.Clientset.CoreV1().Pods(t.Namespace).Delete(ctx, "data-loader-pod", metav1.DeleteOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete data loader pod: %v", err)
+	}
+
 	// Create a Kubernetes Job to run the Terraform apply command.
 	jobName := fmt.Sprintf("terraform-apply-job-%s", options.EnvRecipe.Name)
+
+
+    // Step 5: Proceed with creating the Terraform Job
+    err = createTerraformJob(clientset, namespace, "terraform-job")
+    if err != nil {
+        return fmt.Errorf("failed to create Terraform job: %v", err)
+    }
 
 	if err := e.createTerraformJob(ctx, jobName, "apply -state=/app/terraform/state/terraform.tfstate", options); err != nil {
 		return nil, fmt.Errorf("failed to create Kubernetes Job: %v", err)
@@ -247,149 +291,70 @@ func (e *executor) createTerraformJob(ctx context.Context, jobName, action strin
 	terraform %s -state=/app/terraform/state/terraform.tfstate -auto-approve &&
 	echo "Terraform %s completed"`, action, action, action, action)
 
-	// Define the Init Container
-	initContainer := corev1.Container{
-		Name:  "init-copy-data",
-		Image: "alpine", // Use a lightweight image
-		Command: []string{
-			"/bin/sh",
-			"-c",
-			fmt.Sprintf("cp -r %s/* /app/terraform/", options.RootDir),
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "terraform-config",
-				MountPath: "/app/terraform",
-			},
-		},
-	}
-
-	// Define the main Terraform container
-	container := corev1.Container{
-		Name:  "terraform",
-		Image: "hashicorp/terraform:1.5.7", // Use the appropriate Terraform image
-		Command: []string{
-			"/bin/sh",
-			"-c",
-			tfCommand,
-		},
-		WorkingDir: "/app/terraform",
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "terraform-config",
-				MountPath: "/app/terraform",
-			},
-		},
-	}
-
-	// Define the volumes
-	volumes := []corev1.Volume{
-		{
-			Name: "terraform-config",
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: "terraform-pvc",
-				},
-			},
-		},
-	}
-
-	// Define the Job
-	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: options.Namespace,
-		},
-		Spec: batchv1.JobSpec{
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					InitContainers: []corev1.Container{initContainer},
-					Containers:     []corev1.Container{container},
-					Volumes:        volumes,
-					RestartPolicy:  corev1.RestartPolicyNever,
-				},
-			},
-		},
-	}
-
+    job := &batchv1.Job{
+        ObjectMeta: metav1.ObjectMeta{
+            Name:      jobName,
+            Namespace: namespace,
+            Labels: map[string]string{
+                "app": "terraform",
+            },
+        },
+        Spec: batchv1.JobSpec{
+            Template: corev1.PodTemplateSpec{
+                Spec: corev1.PodSpec{
+                    Containers: []corev1.Container{
+                        {
+                            Name:  "terraform",
+                            Image: "hashicorp/terraform:latest",
+                            Command: []string{
+                                "sh",
+                                "-c",
+                                command,
+                            },
+                            VolumeMounts: []corev1.VolumeMount{
+                                {
+                                    Name:      "terraform-config",
+                                    MountPath: "/terraform-config",
+                                },
+                                {
+                                    Name:      "terraform-state",
+                                    MountPath: "/terraform-state",
+                                },
+                            },
+                        },
+                    },
+                    Volumes: []corev1.Volume{
+                        {
+                            Name: "terraform-config",
+                            PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+                                ClaimName: "terraform-config-pvc",
+                            },
+                        },
+                        {
+                            Name: "terraform-state",
+                            PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+                                ClaimName: "terraform-pvc",
+                            },
+                        },
+                    },
+                    RestartPolicy: corev1.RestartPolicyOnFailure,
+                },
+            },
+        },
+    }
+/*
+    _, err := clientset.BatchV1().Jobs(namespace).Create(context.TODO(), job, metav1.CreateOptions{})
+    if err != nil && !apierrors.IsAlreadyExists(err) {
+        return fmt.Errorf("failed to create Terraform job: %v", err)
+    }
+*/
 	// Create the Job
 	_, err := jobClient.Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to create Kubernetes Job: %v", err)
 	}
 
-	return nil
-
-	/*
-		job := &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      jobName,
-				Namespace: options.Namespace,
-			},
-			Spec: batchv1.JobSpec{
-				Template: corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{
-						Labels: map[string]string{
-							"job-name": jobName,
-						},
-					},
-					Spec: corev1.PodSpec{
-						RestartPolicy: corev1.RestartPolicyNever,
-						Containers: []corev1.Container{
-							{
-								Name:  "terraform",
-								Image: "hashicorp/terraform:light",
-								Command: []string{
-									"sh",
-									"-c",
-									command,
-								},
-								VolumeMounts: []corev1.VolumeMount{
-									{
-										Name:      "terraform-config",
-										MountPath: "/app/terraform",
-									},
-									{
-										Name:      "terraform-state",
-										MountPath: "/app/terraform/state",
-									},
-								},
-								WorkingDir: "/app/terraform",
-							},
-						},
-						Volumes: []corev1.Volume{
-							{
-								Name: "terraform-config",
-								VolumeSource: corev1.VolumeSource{
-									ConfigMap: &corev1.ConfigMapVolumeSource{
-										LocalObjectReference: corev1.LocalObjectReference{
-											Name: configMapName,
-										},
-									},
-								},
-							},
-							{
-								Name: "terraform-state",
-								VolumeSource: corev1.VolumeSource{
-									PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-										ClaimName: "terraform-pvc",
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-
-		// Create the Job in Kubernetes.
-		_, err := e.k8sClientSet.BatchV1().Jobs(options.Namespace).Create(ctx, job, metav1.CreateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to create Kubernetes Job: %v", err)
-		}
-
-		return nil
-	*/
+    return nil
 }
 
 // createTerraformJob creates a Kubernetes Job that runs Terraform commands.
@@ -592,6 +557,33 @@ func (e *executor) retrieveTerraformOutputs(ctx context.Context, options Options
 
 	return &state, nil
 }
+
+func createConfigPVC(clientset *kubernetes.Clientset, namespace string) error {
+    pvc := &corev1.PersistentVolumeClaim{
+        ObjectMeta: metav1.ObjectMeta{
+            Name:      "terraform-config-pvc",
+            Namespace: namespace,
+        },
+        Spec: corev1.PersistentVolumeClaimSpec{
+            AccessModes: []corev1.PersistentVolumeAccessMode{
+                corev1.ReadWriteMany, // RWX to allow multiple pods to mount if needed
+            },
+            Resources: corev1.ResourceRequirements{
+                Requests: corev1.ResourceList{
+                    corev1.ResourceStorage: resource.MustParse("1Gi"),
+                },
+            },
+        },
+    }
+
+    _, err := clientset.CoreV1().PersistentVolumeClaims(namespace).Create(context.TODO(), pvc, metav1.CreateOptions{})
+    if err != nil && !apierrors.IsAlreadyExists(err) {
+        return fmt.Errorf("failed to create terraform-config-pvc: %v", err)
+    }
+
+    return nil
+}
+
 
 /*
 func NewExecutor(clientset *kubernetes.Clientset) *executor {
