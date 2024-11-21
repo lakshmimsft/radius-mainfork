@@ -33,6 +33,7 @@ import (
 	ucp_provider "github.com/radius-project/radius/pkg/ucp/secret/provider"
 	"github.com/radius-project/radius/pkg/ucp/ucplog"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 var (
@@ -43,8 +44,8 @@ var (
 var _ TerraformExecutor = (*executor)(nil)
 
 // NewExecutor creates a new Executor with the given UCP connection and secret provider, to execute a Terraform recipe.
-func NewExecutor(ucpConn sdk.Connection, secretProvider *ucp_provider.SecretProvider, k8sClientSet kubernetes.Interface) *executor {
-	return &executor{ucpConn: ucpConn, secretProvider: secretProvider, k8sClientSet: k8sClientSet}
+func NewExecutor(ucpConn sdk.Connection, secretProvider *ucp_provider.SecretProvider, k8sClientSet kubernetes.Interface, k8sRestConfig *rest.Config) *executor {
+	return &executor{ucpConn: ucpConn, secretProvider: secretProvider, k8sClientSet: k8sClientSet, k8sRestConfig: k8sRestConfig}
 }
 
 type executor struct {
@@ -56,6 +57,9 @@ type executor struct {
 
 	// k8sClientSet is the Kubernetes client.
 	k8sClientSet kubernetes.Interface
+
+	// k8sRestConfig is the Kubernetes REST configuration.
+	k8sRestConfig *rest.Config
 }
 
 /*

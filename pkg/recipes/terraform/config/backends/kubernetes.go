@@ -19,7 +19,6 @@ package backends
 import (
 	"context"
 	"crypto/sha1"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -29,8 +28,6 @@ import (
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 var _ Backend = (*kubernetesBackend)(nil)
@@ -127,7 +124,7 @@ func generateKubernetesBackendConfig(secretSuffix string) (map[string]interface{
 		},
 	}
 
-	_, err := rest.InClusterConfig()
+	/*_, err := rest.InClusterConfig()
 	if err != nil {
 		// If in cluster config is not present, then use default kubeconfig file.
 		if errors.Is(err, rest.ErrNotInCluster) {
@@ -138,12 +135,12 @@ func generateKubernetesBackendConfig(secretSuffix string) (map[string]interface{
 		} else {
 			return nil, err
 		}
-	} else {
-		if value, found := backend[BackendKubernetes]; found {
-			backendValue := value.(map[string]interface{})
-			backendValue["in_cluster_config"] = true
-		}
+	} else {*/
+	if value, found := backend[BackendKubernetes]; found {
+		backendValue := value.(map[string]interface{})
+		backendValue["in_cluster_config"] = true
 	}
+	//}
 
 	return backend, nil
 }

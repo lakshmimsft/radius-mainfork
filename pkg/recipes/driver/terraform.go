@@ -30,6 +30,7 @@ import (
 	rpv1 "github.com/radius-project/radius/pkg/rp/v1"
 	"golang.org/x/exp/slices"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	"github.com/radius-project/radius/pkg/recipes"
 	"github.com/radius-project/radius/pkg/recipes/terraform"
@@ -48,9 +49,9 @@ import (
 var _ Driver = (*terraformDriver)(nil)
 
 // NewTerraformDriver creates a new instance of driver to execute a Terraform recipe.
-func NewTerraformDriver(ucpConn sdk.Connection, secretProvider *ucp_provider.SecretProvider, options TerraformOptions, k8sClientSet kubernetes.Interface) Driver {
+func NewTerraformDriver(ucpConn sdk.Connection, secretProvider *ucp_provider.SecretProvider, options TerraformOptions, k8sClientSet kubernetes.Interface, k8sRestConfig *rest.Config) Driver {
 	return &terraformDriver{
-		terraformExecutor: terraform.NewExecutor(ucpConn, secretProvider, k8sClientSet),
+		terraformExecutor: terraform.NewExecutor(ucpConn, secretProvider, k8sClientSet, k8sRestConfig),
 		options:           options,
 	}
 }

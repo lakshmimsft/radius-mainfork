@@ -18,11 +18,8 @@ package providers
 
 import (
 	"context"
-	"errors"
 
 	"github.com/radius-project/radius/pkg/recipes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
@@ -38,18 +35,20 @@ type kubernetesProvider struct{}
 // in-cluster config is not present.
 // https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs
 func (p *kubernetesProvider) BuildConfig(ctx context.Context, envConfig *recipes.Configuration) (map[string]any, error) {
-	_, err := rest.InClusterConfig()
+	/*_, err := rest.InClusterConfig()
 	if err != nil {
 		// If in cluster config is not present, then use default kubeconfig file.
 		if errors.Is(err, rest.ErrNotInCluster) {
 			return map[string]any{
-				"config_path": clientcmd.RecommendedHomeFile,
+				//"config_path": clientcmd.RecommendedHomeFile,
+				"in_cluster_config": true,
 			}, nil
 		}
 
-		return nil, err
-	}
 
+	/	return nil, err
+	}
+	*/
 	// No additional config is needed if in cluster config is present.
 	// https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs#in-cluster-config
 	return nil, nil
