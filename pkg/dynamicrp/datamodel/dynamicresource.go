@@ -74,12 +74,16 @@ func (d *DynamicResource) GetRecipe() *portableresources.ResourceRecipe {
 
 	obj, ok := d.Properties["recipe"]
 	if !ok {
-		return &portableresources.ResourceRecipe{}
+		return &portableresources.ResourceRecipe{
+			Name: portableresources.DefaultRecipeName,
+		}
 	}
 
 	recipe, ok := obj.(map[string]any)
 	if !ok {
-		return &portableresources.ResourceRecipe{}
+		return &portableresources.ResourceRecipe{
+			Name: portableresources.DefaultRecipeName,
+		}
 	}
 
 	// This is the best we can do. We require all of the data we store to be JSON-marshallable,

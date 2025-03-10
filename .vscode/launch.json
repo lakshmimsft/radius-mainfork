@@ -39,6 +39,10 @@
       "mode": "auto",
       "preLaunchTask": "Build Radius (all)",
       "program": "${workspaceFolder}/cmd/dynamic-rp/main.go",
+      "args": [
+        "--config-file",
+        "${workspaceFolder}/cmd/dynamic-rp/dynamicrp-dev.yaml",
+      ],
     },
     {
       "name": "Launch UCP",

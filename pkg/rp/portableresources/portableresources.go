@@ -40,6 +40,7 @@ func IsValidPortableResourceType(resourceType string) bool {
 		ds_ctrl.RedisCachesResourceType,
 		ds_ctrl.SqlDatabasesResourceType,
 		ExtendersResourceType,
+		"Lakshmi.Resources/lakTypeB",
 	}
 
 	for _, s := range portableResourceTypes {
@@ -63,6 +64,7 @@ func GetValidPortableResourceTypes() []string {
 		ds_ctrl.RedisCachesResourceType,
 		ds_ctrl.SqlDatabasesResourceType,
 		ExtendersResourceType,
+		"Lakshmi.Resources/lakTypeB",
 	}
 	sort.Strings(resourceTypes)
 
