@@ -124,6 +124,9 @@ func (c *CreateOrUpdateResource[P, T]) Run(ctx context.Context, req *ctrl.Reques
 			recipeData.DeploymentStatus = util.Success
 			recipeDataModel.SetRecipe(recipeData)
 		}
+		if recipeOutput != nil && recipeOutput.Status != nil {
+			setRecipeStatus(data, *recipeOutput.Status)
+		}
 	}
 
 	update := &database.Object{
@@ -174,4 +177,14 @@ func (c *CreateOrUpdateResource[P, T]) executeRecipeIfNeeded(ctx context.Context
 		PreviousState: prevState,
 		Simulated:     simulated,
 	})
+}
+
+// setRecipeStatus sets the recipe status for the given resource model.
+// It retrieves the resource metadata from the provided model, deep copies the current resource status,
+// updates the Recipe field with the supplied recipeStatus, and then applies the updated status back to the resource.
+func setRecipeStatus[P rpv1.RadiusResourceModel](data P, recipeStatus rpv1.RecipeStatus) {
+	rm := data.ResourceMetadata()
+	status := rm.GetResourceStatus().DeepCopyRecipeStatus()
+	status.Recipe = &recipeStatus
+	rm.SetResourceStatus(status)
 }
