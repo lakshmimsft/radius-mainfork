@@ -18,16 +18,21 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	v1 "github.com/radius-project/radius/pkg/armrpc/api/v1"
 	ctrl "github.com/radius-project/radius/pkg/armrpc/asyncoperation/controller"
+	"github.com/radius-project/radius/pkg/dynamicrp/backend/processor"
 	"github.com/radius-project/radius/pkg/recipes/configloader"
 	"github.com/radius-project/radius/pkg/recipes/engine"
+	"github.com/radius-project/radius/pkg/schema"
 	"github.com/radius-project/radius/pkg/ucp/api/v20231001preview"
 	"github.com/radius-project/radius/pkg/ucp/datamodel"
 	"github.com/radius-project/radius/pkg/ucp/resources"
+	"github.com/radius-project/radius/pkg/ucp/ucplog"
 )
 
 // DynamicResourceController is the async operation controller to perform processing on dynamic resources.
@@ -51,8 +56,34 @@ func NewDynamicResourceController(opts ctrl.Options, ucp *v20231001preview.Clien
 	}, nil
 }
 
+// extractOperationContext parses the operation type and fetches resource type details
+// This is used by both selectController and validateRequestSchema
+func (c *DynamicResourceController) extractOperationContext(ctx context.Context, request *ctrl.Request) (v1.OperationType, *v20231001preview.ResourceTypeResource, error) {
+	parsedOperationType, ok := v1.ParseOperationType(request.OperationType)
+	if !ok {
+		return v1.OperationType{}, nil, fmt.Errorf("invalid operation type: %q", request.OperationType)
+	}
+
+	id, err := resources.ParseResource(request.ResourceID)
+	if err != nil {
+		return v1.OperationType{}, nil, fmt.Errorf("invalid resource ID: %q", request.ResourceID)
+	}
+
+	resourceTypeDetails, err := c.fetchResourceTypeDetails(ctx, id)
+	if err != nil {
+		return v1.OperationType{}, nil, fmt.Errorf("failed to fetch resource type details: %w", err)
+	}
+
+	return parsedOperationType, resourceTypeDetails, nil
+}
+
 // Run implements the async controller interface.
 func (c *DynamicResourceController) Run(ctx context.Context, request *ctrl.Request) (ctrl.Result, error) {
+	// Validate request body against schema if available
+	if err := c.validateRequestSchema(ctx, request); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// This is where we have the opportunity to branch out to different controllers based on:
 	// - The operation type. (eg: PUT, DELETE, etc)
 	// - The capabilities of the resource type. (eg: Does it support recipes?)
@@ -62,40 +93,81 @@ func (c *DynamicResourceController) Run(ctx context.Context, request *ctrl.Reque
 	}
 
 	return controller.Run(ctx, request)
-
 }
 
-func (c *DynamicResourceController) selectController(ctx context.Context, request *ctrl.Request) (ctrl.Controller, error) {
-	ot, ok := v1.ParseOperationType(request.OperationType)
+// validateRequestSchema validates the request body against the resource type's schema
+func (c *DynamicResourceController) validateRequestSchema(ctx context.Context, request *ctrl.Request) error {
+	// Extract operation context once
+	operationContext, resourceTypeDetails, err := c.extractOperationContext(ctx, request)
+	if err != nil {
+		return err
+	}
+
+	// Skip validation for non-PUT operations
+	if operationContext.Method != v1.OperationPut {
+		return nil
+	}
+
+	// Get the resource data from storage for validation
+	resourceData, err := c.getResourceDataFromStorage(ctx, request.ResourceID)
+	if err != nil {
+		// For new resources (PUT operations), this is expected
+		logger := ucplog.FromContextOrDiscard(ctx)
+		logger.V(ucplog.LevelDebug).Info("Resource not found in storage, skipping validation for new resource", "resourceID", request.ResourceID)
+		return nil
+	}
+
+	if resourceData == nil {
+		return nil
+	}
+
+	// Extract API version from resource data
+	apiVersion, ok := resourceData["apiVersion"].(string)
 	if !ok {
-		return nil, fmt.Errorf("invalid operation type: %q", request.OperationType)
+		return fmt.Errorf("missing or invalid apiVersion in resource")
 	}
 
-	id, err := resources.ParseResource(request.ResourceID)
+	// Get the schema for the resource type
+	schemaData, err := processor.GetSchemaForResourceType(ctx, c.ucp, *resourceTypeDetails.Name, apiVersion)
 	if err != nil {
-		return nil, fmt.Errorf("invalid resource ID: %q", request.ResourceID)
+		if errors.Is(err, processor.ErrNoSchemaFound) {
+			logger := ucplog.FromContextOrDiscard(ctx)
+			logger.V(ucplog.LevelDebug).Info("No schema found for resource type, skipping validation", "resourceType", *resourceTypeDetails.Name)
+			return nil
+		}
+		return fmt.Errorf("failed to get schema: %w", err)
 	}
 
-	resourceType, err := c.fetchResourceTypeDetails(ctx, id)
+	// Validate the resource against the schema using the schema package
+	if err := schema.ValidateResourceAgainstSchema(resourceData, schemaData); err != nil {
+		return fmt.Errorf("schema validation failed: %w", err)
+	}
+
+	return nil
+}
+
+// selectController determines which controller to use based on the operation and resource capabilities
+func (c *DynamicResourceController) selectController(ctx context.Context, request *ctrl.Request) (ctrl.Controller, error) {
+	operationType, resourceTypeDetails, err := c.extractOperationContext(ctx, request)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch resource type for ID %q: %w", id.String(), err)
+		return nil, err
 	}
 
 	options := ctrl.Options{
 		DatabaseClient: c.DatabaseClient(),
-		ResourceType:   id.Type(),
+		ResourceType:   *resourceTypeDetails.Name,
 		UcpClient:      c.ucp,
 	}
 
-	switch ot.Method {
+	switch operationType.Method {
 	case v1.OperationDelete:
-		if hasCapability(resourceType, datamodel.CapabilitySupportsRecipes) {
+		if hasCapability(resourceTypeDetails, datamodel.CapabilitySupportsRecipes) {
 			return NewRecipeDeleteController(options, c.engine, c.configurationLoader)
 		}
 		return NewInertDeleteController(options)
 
 	case v1.OperationPut:
-		if hasCapability(resourceType, datamodel.CapabilitySupportsRecipes) {
+		if hasCapability(resourceTypeDetails, datamodel.CapabilitySupportsRecipes) {
 			return NewRecipePutController(options, c.engine, c.configurationLoader)
 		}
 		return NewInertPutController(options)
@@ -123,6 +195,34 @@ func (c *DynamicResourceController) fetchResourceTypeDetails(ctx context.Context
 	return &response.ResourceTypeResource, nil
 }
 
+// getResourceDataFromStorage retrieves resource data from storage and converts it to a map
+func (c *DynamicResourceController) getResourceDataFromStorage(ctx context.Context, resourceID string) (map[string]interface{}, error) {
+	storageClient := c.DatabaseClient()
+	obj, err := storageClient.Get(ctx, resourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract the resource data for validation
+	resourceData := obj.Data
+	if resourceData == nil {
+		return nil, nil
+	}
+
+	// Convert resource data to map for validation
+	resourceJSON, err := json.Marshal(resourceData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal resource data: %w", err)
+	}
+
+	var resourceMap map[string]interface{}
+	if err := json.Unmarshal(resourceJSON, &resourceMap); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal resource data: %w", err)
+	}
+
+	return resourceMap, nil
+}
+
 // hasCapability determines if a resource type has a specific capability.
 // It returns true when the given input capability string exists in the resource type's
 // capabilities list, false otherwise.
@@ -135,3 +235,41 @@ func hasCapability(resourceType *v20231001preview.ResourceTypeResource, capabili
 
 	return false
 }
+
+/*
+// Helper function to extract resource type from URL path
+func extractResourceType(path string) string {
+	// Parse the path to extract resource type
+	// Example: /planes/radius/local/resourceGroups/test-rg/providers/Applications.Core/applications/test-app
+	// Would return "Applications.Core/applications"
+	parts := strings.Split(path, "/")
+	for i, part := range parts {
+		if part == "providers" && i+2 < len(parts) {
+			return fmt.Sprintf("%s/%s", parts[i+1], parts[i+2])
+		}
+	}
+	return ""
+}
+		// No schema defined, skip validation
+		logger := ucplog.FromContextOrDiscard(ctx)
+		logger.V(ucplog.LevelDebug).Info("No schema found for resource type, skipping validation")
+		return nil
+	}
+
+	// Create validator and validate
+	validator := processor.NewSchemaValidator()
+
+	// Convert schema to JSON bytes if needed
+	schemaBytes, err := json.Marshal(resourceTypeDetails.Schema)
+	if err != nil {
+		return fmt.Errorf("failed to marshal schema: %w", err)
+	}
+
+	// Validate the request body against the schema
+	if err := validator.ValidateResource(body, schemaBytes); err != nil {
+		return err
+	}
+
+	return nil
+}
+*/
