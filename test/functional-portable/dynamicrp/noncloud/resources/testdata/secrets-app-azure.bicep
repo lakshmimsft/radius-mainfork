@@ -4,14 +4,23 @@ extension testresources
 @description('Specifies the location for resources.')
 param location string = 'westus2'
 
+@description('Specifies the oidc issuer URL.')
+#disable-next-line no-hardcoded-env-urls
+param oidcIssuer string = 'https://eastus.oic.prod-aks.azure.com/bdfed5a8-05f1-40c5-9539-813b88cae8fd/efb919f6-1337-4540-8e53-5093b23259fe/'
+
+
 resource secretenv 'Applications.Core/environments@2023-10-01-preview' = {
-  name: 'secret-azure-env'
+  name: 'secret-azure-env5'
   location: location
   properties: {
     compute: {
       kind: 'kubernetes'
       resourceId: 'self'
-      namespace: 'secret-azure-env'
+      namespace: 'secret-azure-env5'
+      identity: {
+        kind: 'azure.com.workload'
+        oidcIssuer: oidcIssuer
+      }
     }
     providers: {
       azure: {
@@ -30,14 +39,14 @@ resource secretenv 'Applications.Core/environments@2023-10-01-preview' = {
 }
 
 resource secretsazureapp 'Applications.Core/applications@2023-10-01-preview' = {
-  name: 'secretsazureappbicep'
+  name: 'secretsazureappbicep5'
   location: location
   properties: {
     environment: secretenv.id
     extensions: [
       {
         kind: 'kubernetesNamespace'
-        namespace: 'secretsazureappbicep'
+        namespace: 'secretsazureappbicep5'
       }
     ]
   }

@@ -13,6 +13,31 @@ var normalizedName = resourceName
 var resourceProperties = context.resource.properties ?? {}
 var containerItems = items(resourceProperties.containers ?? {})
 
+// Extract connection data from linked resources
+var resourceConnections = context.resource.connections ?? {}
+
+// // Extract Key Vault reference from connections if it exists
+// var keyVaultConnections = reduce(items(resourceConnections), {}, (acc, conn) =>
+//   contains(conn.value, 'id') && contains(string(conn.value.id), 'Microsoft.KeyVault/vaults')
+//     ? union(acc, { '${conn.key}': conn.value.id })
+//     : acc
+// )
+
+// TESTING: Hardcoded Key Vault ID
+var keyVaultId = '/subscriptions/bb48e769-817e-4890-ab84-db911c92c791/resourceGroups/lak-azrg/providers/Microsoft.KeyVault/vaults/lak-azure-secret'
+var hasKeyVault = true
+
+// Get Key Vault details for CSI driver (no need to reference the resource, just extract the name)
+var keyVaultName = last(split(keyVaultId, '/'))
+var keyVaultTenantId = subscription().tenantId
+
+// Define the secrets to mount from Key Vault (hardcoded for testing)
+var keyVaultSecretNames = ['username', 'password', 'apikey']
+
+// Workload identity configuration
+var workloadIdentityClientId = '<YOUR_MANAGED_IDENTITY_CLIENT_ID>'  // Replace with output from: az identity show --name radius-keyvault-reader --resource-group lak-azrg --query clientId -o tsv
+var workloadIdentityServiceAccount = 'workload-identity-sa'
+
 var daprSidecar = resourceProperties.?extensions.?daprSidecar
 var hasDaprSidecar = daprSidecar != null
 var effectiveDaprAppId = hasDaprSidecar && daprSidecar.?appId != null && string(daprSidecar.?appId) != '' ? string(daprSidecar.?appId) : normalizedName
@@ -57,25 +82,43 @@ var containerSpecs = reduce(containerItems, [], (acc, item) => concat(acc, [{
         protocol: port.value.?protocol ?? 'TCP'
       }]))
     } : {},
-    // TODO: Add support for environment variables from Radius secrets resource
-    // When a container references a Radius.Security/secrets resource via connections,
-    // the recipe should automatically populate environment variables from the secret values
-    // stored in the connected Radius secret resource.
-    contains(item.value, 'env') ? {
-      env: reduce(items(item.value.env), [], (envAcc, envItem) => concat(envAcc, [union(
-        {
-          name: envItem.key
-        },
-        contains(envItem.value, 'value') ? { value: envItem.value.value } : {}
-        // TODO: Add support for environment variables from Radius secrets resource
-      )]))
+    // Add environment variables from container spec and Key Vault secrets
+    contains(item.value, 'env') || hasKeyVault ? {
+      env: concat(
+        // Add regular environment variables from container spec
+        contains(item.value, 'env') ? reduce(items(item.value.env), [], (envAcc, envItem) => concat(envAcc, [union(
+          {
+            name: envItem.key
+          },
+          contains(envItem.value, 'value') ? { value: envItem.value.value } : {}
+        )])) : [],
+        // Add environment variables from Key Vault secrets via Kubernetes secret
+        hasKeyVault ? reduce(keyVaultSecretNames, [], (acc, secretName) => concat(acc, [{
+          name: toUpper(secretName)
+          valueFrom: {
+            secretKeyRef: {
+              name: '${normalizedName}-kv-secret'
+              key: secretName
+            }
+          }
+        }])) : []
+      )
     } : {},
-    // Add volume mounts if they exist
-    contains(item.value, 'volumeMounts') ? {
-      volumeMounts: reduce(item.value.volumeMounts, [], (vmAcc, vm) => concat(vmAcc, [{
-        name: vm.volumeName
-        mountPath: vm.mountPath
-      }]))
+    // Add volume mounts for CSI driver
+    hasKeyVault || contains(item.value, 'volumeMounts') ? {
+      volumeMounts: concat(
+        // Add CSI volume mount for Key Vault
+        hasKeyVault ? [{
+          name: 'secrets-store-inline'
+          mountPath: '/mnt/secrets-store'
+          readOnly: true
+        }] : [],
+        // Add existing volume mounts
+        contains(item.value, 'volumeMounts') ? reduce(item.value.volumeMounts, [], (vmAcc, vm) => concat(vmAcc, [{
+          name: vm.volumeName
+          mountPath: vm.mountPath
+        }])) : []
+      )
     } : {},
     // Add command if specified
     contains(item.value, 'command') ? { command: item.value.command } : {},
@@ -158,33 +201,47 @@ var podInitContainers = reduce(containerSpecs, [], (acc, container) => (containe
 
 // Add volume mounts
 var volumeItems = items(resourceProperties.?volumes ?? {})
-var podVolumes = reduce(volumeItems, [], (acc, vol) => concat(acc, [union(
-  {
-    name: vol.key
-  },
-  contains(vol.value, 'persistentVolume') ? union(
-    (contains(vol.value.persistentVolume, 'claimName') && vol.value.persistentVolume.claimName != '') ? {
-      persistentVolumeClaim: {
-        claimName: vol.value.persistentVolume.claimName
+var podVolumes = concat(
+  // Add CSI volume for Key Vault if connected
+  hasKeyVault ? [{
+    name: 'secrets-store-inline'
+    csi: {
+      driver: 'secrets-store.csi.k8s.io'
+      readOnly: true
+      volumeAttributes: {
+        secretProviderClass: '${normalizedName}-kv-sync'
+      }
+    }
+  }] : [],
+  // Add regular volumes from resource properties
+  reduce(volumeItems, [], (acc, vol) => concat(acc, [union(
+    {
+      name: vol.key
+    },
+    contains(vol.value, 'persistentVolume') ? union(
+      (contains(vol.value.persistentVolume, 'claimName') && vol.value.persistentVolume.claimName != '') ? {
+        persistentVolumeClaim: {
+          claimName: vol.value.persistentVolume.claimName
+        }
+      } : {},
+      (!(contains(vol.value.persistentVolume, 'claimName') && vol.value.persistentVolume.claimName != '') && contains(resourceConnections, vol.key) && (resourceConnections[vol.key].?status.?computedValues.?claimName ?? '') != '') ? {
+        persistentVolumeClaim: {
+          claimName: resourceConnections[vol.key].?status.?computedValues.?claimName
+        }
+      } : {}
+    ) : {},
+    contains(vol.value, 'secret') ? {
+      secret: {
+        secretName: vol.value.secret.secretName
       }
     } : {},
-    (!(contains(vol.value.persistentVolume, 'claimName') && vol.value.persistentVolume.claimName != '') && contains(resourceConnections, vol.key) && (resourceConnections[vol.key].?status.?computedValues.?claimName ?? '') != '') ? {
-      persistentVolumeClaim: {
-        claimName: resourceConnections[vol.key].?status.?computedValues.?claimName
-      }
+    contains(vol.value, 'emptyDir') ? {
+      emptyDir: contains(vol.value.emptyDir, 'medium') ? {
+        medium: vol.value.emptyDir.medium
+      } : {}
     } : {}
-  ) : {},
-  contains(vol.value, 'secret') ? {
-    secret: {
-      secretName: vol.value.secret.secretName
-    }
-  } : {},
-  contains(vol.value, 'emptyDir') ? {
-    emptyDir: contains(vol.value.emptyDir, 'medium') ? {
-      medium: vol.value.emptyDir.medium
-    } : {}
-  } : {}
-)]))
+  )]))
+)
 
 resource deployment 'apps/Deployment@v1' = {
   metadata: {
@@ -202,7 +259,9 @@ resource deployment 'apps/Deployment@v1' = {
     template: {
       metadata: union(
         {
-          labels: labels
+          labels: union(labels, hasKeyVault ? {
+            'azure.workload.identity/use': 'true'
+          } : {})
         },
         hasDaprSidecar ? { annotations: podAnnotations } : {}
       )
@@ -210,6 +269,7 @@ resource deployment 'apps/Deployment@v1' = {
         {
           containers: podContainers
         },
+        hasKeyVault ? { serviceAccountName: workloadIdentityServiceAccount } : {},
         length(podInitContainers) > 0 ? { initContainers: podInitContainers } : {},
         length(podVolumes) > 0 ? { volumes: podVolumes } : {},
         contains(resourceProperties, 'restartPolicy') ? { restartPolicy: resourceProperties.restartPolicy } : {}
@@ -305,11 +365,47 @@ resource hpa 'autoscaling/HorizontalPodAutoscaler@v2' = if (hasAutoScaling) {
   }
 }
 
+// Create SecretProviderClass for Azure Key Vault CSI driver
+resource secretProviderClass 'secrets-store.csi.x-k8s.io/SecretProviderClass@v1' = if (hasKeyVault) {
+  metadata: {
+    name: '${normalizedName}-kv-sync'
+    namespace: namespace
+  }
+  spec: {
+    provider: 'azure'
+    parameters: {
+      usePodIdentity: 'false'
+      useVMManagedIdentity: 'false'
+      clientID: workloadIdentityClientId
+      keyvaultName: keyVaultName
+      tenantId: keyVaultTenantId
+      objects: string({
+        array: reduce(keyVaultSecretNames, [], (acc, secretName) => concat(acc, [{
+          objectName: secretName
+          objectType: 'secret'
+        }]))
+      })
+    }
+    // Sync Key Vault secrets as Kubernetes secret for environment variable injection
+    secretObjects: [
+      {
+        secretName: '${normalizedName}-kv-secret'
+        type: 'Opaque'
+        data: reduce(keyVaultSecretNames, [], (acc, secretName) => concat(acc, [{
+          objectName: secretName
+          key: secretName
+        }]))
+      }
+    ]
+  }
+}
+
 var deploymentResource = '/planes/kubernetes/local/namespaces/${namespace}/providers/apps/Deployment/${normalizedName}'
 var serviceResources = reduce(servicesConfig, [], (acc, svc) => concat(acc, ['/planes/kubernetes/local/namespaces/${namespace}/providers/core/Service/${normalizedName}-${svc.containerName}']))
 var hpaResource = hasAutoScaling ? ['/planes/kubernetes/local/namespaces/${namespace}/providers/autoscaling/HorizontalPodAutoscaler/${normalizedName}'] : []
+var secretProviderResource = hasKeyVault ? ['/planes/kubernetes/local/namespaces/${namespace}/providers/secrets-store.csi.x-k8s.io/SecretProviderClass/${normalizedName}-kv-sync'] : []
 
-var allResources = concat([deploymentResource], serviceResources, hpaResource)
+var allResources = concat([deploymentResource], serviceResources, hpaResource, secretProviderResource)
 
 output result object = {
   resources: allResources

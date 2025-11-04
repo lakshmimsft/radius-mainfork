@@ -351,7 +351,7 @@ types:
                               type: object
                               description: (Optional) Set the environment variable value based on a Radius Secrets resource.
                               properties:
-                                secretId:
+                                name:
                                   type: string
                                   description: (Optional) The ID of the Radius Secrets resource.
                                 key:
@@ -613,7 +613,7 @@ types:
                             type: integer
                             description: (Optional) The absolute value of the metric as a quantity.
                     required: [kind, target]
-              required: [metric]
+              required: [metrics]
             extensions:
               type: object
               description: (Optional) Properties for additional functionality. daprSidecar is the only available option.

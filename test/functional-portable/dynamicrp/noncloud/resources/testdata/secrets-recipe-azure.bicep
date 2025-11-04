@@ -3,6 +3,9 @@ param context object
 @description('Specifies the Azure location for resources.')
 param location string = 'westus2'
 
+//@description('Object ID of the service principal or managed identity to grant Key Vault access')
+//param principalId string = '21844a91-2a15-4064-803a-2b93d9e62ad9' // From the error message - your SP object ID
+
 // Extract properties from context
 var secretKind = context.resource.properties.?kind ?? 'generic'
 var secretData = context.resource.properties.data
@@ -55,8 +58,24 @@ resource secrets 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = [for item in i
   }
 }]
 
+// Grant Key Vault Secrets User role to the service principal/managed identity
+// Role: Key Vault Secrets User (4633458b-17de-408a-b874-0445c86b69e6)
+/*
+resource keyVaultRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(keyVault.id, principalId, '4633458b-17de-408a-b874-0445c86b69e6')
+  scope: keyVault
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
+    principalId: principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+*/
 output result object = {
   resources: [
     keyVault.id
   ]
+  values: {
+    vaultUri: keyVault.properties.vaultUri
+  }
 }
