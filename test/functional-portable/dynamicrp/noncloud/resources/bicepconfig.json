@@ -6,6 +6,6 @@
 		"radius": "br:biceptypes.azurecr.io/radius:latest",
 		"aws": "br:biceptypes.azurecr.io/aws:latest",
 		//"testresources": "br:testuserdefinedbiceptypes.azurecr.io/testresources:latest"
-		"testresources": "./testdata/trysecrets4.tgz"
+		"testresources": "./testdata/trysecrets6.tgz"
 	}
 }

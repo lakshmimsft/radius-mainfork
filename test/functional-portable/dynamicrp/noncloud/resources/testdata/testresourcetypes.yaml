@@ -47,8 +47,7 @@ types:
           required:
             - application
             - environment
-  postgres:
-    
+  postgres2:    
     apiVersions:
       '2025-01-01-preview':
         schema: 
@@ -74,6 +73,15 @@ types:
             password:
               type: string
               description: The password for the database.
+            connections:
+              type: object
+              additionalProperties:
+                type: object
+                properties:
+                  source:
+                    type: string
+                    description: The resourceID of the source of the connection.
+  
   externalResource:
     capabilities: ["ManualResourceProvisioning"]
     apiVersions:
@@ -203,6 +211,14 @@ types:
                     type: string
                     description: (Required) The string value of the secret unless encoding is set to 'base64'.
                 required: [value]
+            id:
+              type: string
+              description: (ReadOnly) The ID of the secret in the secret store (e.g., Vault resource ID).
+              readOnly: true
+            path:
+              type: string
+              description: (ReadOnly) The path to the secret in the secret store (e.g., Vault path like 'secret/data/my-secret').
+              readOnly: true
           required:
             - environment
             - data
