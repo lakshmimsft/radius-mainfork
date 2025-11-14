@@ -222,7 +222,51 @@ types:
           required:
             - environment
             - data
-            
+  secrets2:
+    apiVersions:
+      "2025-08-01-preview":
+        schema:
+          type: object
+          properties:
+            environment:
+              type: string
+              description: (Required) The Radius Environment ID. Typically set by the rad CLI. Typically value should be `environment`.
+            application:
+              type: string
+              description: (Optional) The Radius Application ID. `myApplication.id` for example.
+            kind:
+              type: string
+              enum:
+                [
+                  generic,
+                  certificate-pem,
+                  certificate-pkcs12,
+                  basicAuthentication,
+                  awsIRSA,
+                  azureWorkloadIdentity,
+                ]
+              description: (Optional) The kind of content of the secret. If not specified, generic is assumed. basicAuthentication, awsIRSA, and azureWorkloadIdentity should only be used for configuring authentication to OCI registries for storing Bicep templates. This will change in the future.
+            data:
+              type: object
+              description: '(Required) Map of secret data. For example: `data: { username: { value: user1 } password: { value: pass }}`'
+              additionalProperties:
+                type: object
+                properties:
+                  encoding:
+                    type: string
+                    enum: [string, base64]
+                    description: (Optional) Content encoding of the value. If not specified, `string` is assumed.
+                  value:
+                    type: string
+                    description: (Required) The string value of the secret unless encoding is set to 'base64'.
+                required: [value]
+            id:
+              type: string
+              description: (ReadOnly) The ID of the secret in the secret store (e.g., Vault resource ID).
+              readOnly: true
+          required:
+            - environment
+            - data          
   containers:
     description: |
       The Radius.Compute/containers Resource Type is the primary resource type for running one or more containers. It is always part of a Radius Application. To deploy a Container add a resource to the application definition Bicep file.
