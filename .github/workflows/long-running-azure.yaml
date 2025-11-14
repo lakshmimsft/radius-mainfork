@@ -433,7 +433,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: skip-delete-resources-list.txt
-          key: skip-delete-resources-list-file    
+          key: skip-delete-resources-list-${{ env.UNIQUE_ID || github.run_id }}
+          restore-keys: |
+            skip-delete-resources-list-
       - name: Clean up cluster
         if: always()
         timeout-minutes: 60
@@ -523,7 +525,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: skip-delete-resources-list.txt
-          key: skip-delete-resources-list-file
+          key: skip-delete-resources-list-${{ env.UNIQUE_ID || github.run_id }}
       - name: Configure Radius test workspace
         run: |
           set -x
@@ -668,7 +670,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: skip-delete-resources-list.txt
-          key: skip-delete-resources-list-file
+          key: skip-delete-resources-list-${{ env.UNIQUE_ID || github.run_id }}
+          restore-keys: |
+            skip-delete-resources-list-
       - name: Clean up cluster
         if: always()
         timeout-minutes: 60
