@@ -9,11 +9,11 @@ extension kubernetes with {
 param registry string
 
 param version string
+*/
 
 @description('PostgreSQL password')
 @secure()
-param password string = newGuid()
-*/
+param secretPassword string
 
 resource udtenv 'Applications.Core/environments@2023-10-01-preview' = {
   name: 'postgres-secret5'
@@ -80,7 +80,7 @@ resource secret 'Test.Resources/secrets2@2025-08-01-preview' = {
         value: 'admin'
       }
       password: {
-        value: 'c2VjcmV0cGFzc3dvcmQ='
+        value: base64(secretPassword)
         encoding: 'base64'
       }
       dbname: {
